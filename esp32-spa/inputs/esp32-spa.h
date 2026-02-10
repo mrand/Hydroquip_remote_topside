@@ -254,6 +254,53 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     });
   }
 
+// Decode a 24-bit MC14489 frame into the p1/p2/p3/p4 structure
+// expected by the existing loop() logic that expects data from Balboa VL260-topside
+bool decode_mc14489(uint32_t raw, uint8_t &p1, uint8_t &p2, uint8_t &p3, uint8_t &p4) {
+    // MC14489 format:
+    // [M2 M1 M0] [D1 D2 D3 D4] [D5 D6 D7 D8] [D9 D10 D11 D12] [D13 D14 D15 D16] [D17 D18 D19 D20]
+    // Mode bits = top 3 bits
+    // 5 digits = 5 × 4-bit BCD
+
+    uint8_t mode = (raw >> 21) & 0x07;
+
+    uint8_t d[5];
+    for (int i = 0; i < 5; i++) {
+        d[i] = (raw >> (17 - 4*i)) & 0x0F;
+        if (d[i] > 9) d[i] = 0x0F;  // invalid BCD → blank
+    }
+
+    // Map MC14489 digits into the existing p1/p2/p3/p4 structure
+    // p1, p2, p3 are 7-seg patterns in the Balboa code.
+    // For MC14489, we convert BCD → 7-seg here.
+
+    static const uint8_t segmap[10] = {
+        0b1111110, // 0
+        0b0110000, // 1
+        0b1101101, // 2
+        0b1111001, // 3
+        0b0110011, // 4
+        0b1011011, // 5
+        0b1011111, // 6
+        0b1110000, // 7
+        0b1111111, // 8
+        0b1110011  // 9
+    };
+
+    // Convert digits 0–4 into the same fields Balboa uses:
+    // p1 = hundreds (7-seg)
+    // p2 = tens (7-seg)
+    // p3 = ones (7-seg)
+    // p4 = status bits (we set to zero)
+
+    p1 = (d[0] <= 9) ? segmap[d[0]] : 0;
+    p2 = (d[1] <= 9) ? segmap[d[1]] : 0;
+    p3 = (d[2] <= 9) ? segmap[d[2]] : 0;
+    p4 = 0;  // MC14489 has no pump/light/heater bits
+
+    return true;
+}
+
   void loop() override {
     uint32_t now = esphome::millis();
 
@@ -311,20 +358,10 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
       uint32_t out = last_published_value & 0xFFFFFF;
 
-      uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
-      uint8_t p2 = (out >> 10) & 0x7F;  // next 7 bits
-      uint8_t p3 = (out >> 3)  & 0x7F;  // next 7 bits
-      uint8_t p4 = out & 0x7;          // last 3 bits
-
-      // Decode/validate exactly like new frames
-      // Require p1 to match pattern 0xx0x00 (bits 6,3,1,0 must be zero)
-      // AND require the least-significant bit of p4 to be 0 (LSB of status nibble)
-      const uint8_t checksum_mask = 0x4B;  // 0b1001011 (mask bits 6,3,1,0)
-      const uint8_t checksum_val  = 0x00;  // expected zeros in masked bits
-      const uint8_t p4_mask = 0x1;        // require p4 LSB == 0
-      if ((p1 & checksum_mask) != checksum_val || (p4 & p4_mask) != 0) {
-        ESP_LOGW(TAG, "Heartbeat: stored frame fails checksum (p1 masked=0x%02X expected=0x%02X, p4_lsb=0x%X expected=0x0), not publishing",
-                static_cast<unsigned>(p1 & checksum_mask), static_cast<unsigned>(checksum_val), static_cast<unsigned>(p4 & p4_mask));
+      uint8_t p1, p2, p3, p4; 
+      if (!decode_mc14489(out, p1, p2, p3, p4)) { 
+        ESP_LOGW(TAG, "MC14489 decode failed");
+        last_frame_valid = false;
         return;
       }
 
@@ -393,22 +430,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     uint32_t out = value & 0xFFFFFF;
 
     // Split into parts
-    uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
-    uint8_t p2 = (out >> 10) & 0x7F;  // next 7 bits
-    uint8_t p3 = (out >> 3)  & 0x7F;  // next 7 bits
-    uint8_t p4 = out & 0x7;          // last 3 bits
-
-    // Verify checksum to filter invalid frames
-    const uint8_t checksum_mask = 0x4B;  // 0b1001011 (mask bits 6,3,1,0)
-    const uint8_t checksum_val  = 0x00;  // expected zeros in masked bits
-    const uint8_t p4_mask = 0x1;        // require p4 LSB == 0
-    if ((p1 & checksum_mask) != checksum_val || (p4 & p4_mask) != 0) {
-      ESP_LOGW(TAG, "Frame fails checksum (p1 masked=0x%02X expected=0x%02X, p4_lsb=0x%X), ignoring",
-                static_cast<unsigned>(p1 & checksum_mask), static_cast<unsigned>(checksum_val), static_cast<unsigned>(p4 & p4_mask));
-      // Treat as non-existent frame
-      last_frame_valid = false;
-      return;
-    }
+    uint8_t p1, p2, p3, p4; 
+    decode_mc14489(out, p1, p2, p3, p4);
 
     // Small debug: log raw frame and parts
     ESP_LOGD(TAG, "Frame received raw=0x%06X p1=0x%02X p2=0x%02X p3=0x%02X p4=0x%X", out, static_cast<unsigned>(p1), static_cast<unsigned>(p2), static_cast<unsigned>(p3), static_cast<unsigned>(p4));
@@ -733,3 +756,4 @@ extern "C" void IRAM_ATTR esp32_spa_isr_wrapper(void* arg) {
   auto *self = static_cast<esp32_spa::HotTubDisplaySensor*>(arg);
   if (self) self->handle_isr();
 }
+
