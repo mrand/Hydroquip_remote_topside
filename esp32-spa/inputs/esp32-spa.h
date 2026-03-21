@@ -127,8 +127,46 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_light_sensor(esphome::binary_sensor::BinarySensor *s) { light_sensor_ = s; }
 
 
+#ifdef MC14889
+  // Decode temperature from p1, p2, p3
+  static int16_t decode_temp(uint8_t p1, int8_t d2, int8_t d3) {
+    if (d2 < 0 || d3 < 0) return -1;  // invalid digits
+    return p1*100 + d2 * 10 + d3;
+  }
 
-  
+  static int8_t decode_7seg(uint8_t seg) {
+    seg &= 0xF;
+    if (seg <= 9) return static_cast<int8_t>(seg);
+    // If no exact match, treat as invalid (disregard)
+    return -1;
+  }
+
+  // Decode a 7-seg pattern into a single character used in error codes.
+  static char decode_7seg_char(uint8_t seg) {
+    // MC14489 special decode table (datasheet Table 1)
+    static const char map[16] = {
+        '\0', // 0 blank
+        'c',  // 1
+        'H',  // 2
+        'h',  // 3
+        'J',  // 4
+        'L',  // 5
+        'n',  // 6
+        'o',  // 7
+        'P',  // 8
+        'r',  // 9
+        'U',  // A
+        'u',  // B
+        'y',  // C
+        '-',  // D
+        '=',  // E
+        'o'   // F
+    };
+    return map[seg & 0xF];
+  }
+
+#else
+
   // Decode temperature from p1, p2, p3
   // p2 = tens digit, p3 = ones digit, bits 5&4 of p1 both high = add 100
   static int16_t decode_temp(uint8_t p1, int8_t d2, int8_t d3) {
@@ -202,9 +240,13 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
     return '\0';
   }
-
+#endif
+   
   // Translate known error codes to plain English
   static const char* translate_error_code(const std::string &code) {
+    if (code == "LO" || code == "Lo" || code == "L0") return "Low flow or flow sensor fault";
+    if (code == "LC" || code == "Lc") return "Flow sensor fault";
+    if (code == "OL") return "high overheat";
     if (code == "--") return "unknown temperature (expected after power on)";
     if (code == "HH") return "high overheat (water temp over 118 F)";
     if (code == "OH") return "overheat (water temp over 108 F)";
@@ -311,6 +353,25 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
       uint32_t out = last_published_value & 0xFFFFFF;
 
+#ifdef MC14889
+      uint8_t bank5 = (out >> 12) & 0xF;
+      uint8_t bank4 = (out >> 12) & 0xF;
+      uint8_t p1 = (out >> 8)  & 0xF;   // bank3
+      uint8_t p2 = (out >> 4)  & 0xF;   // bank2
+      uint8_t p3 = (out >> 0)  & 0xF;   // bank1 is LSB in data stream
+
+      int8_t digit2 = decode_7seg(p2);
+      int8_t digit3 = decode_7seg(p3);
+
+      int16_t temp = decode_temp(p1, digit2, digit3);
+
+      // Heartbeat: publish binary sensor states (semi-educated guesses on bit locations)
+      int heater_val = static_cast<int>((bank4 >> 0) & 0x1);
+      int pump_val  = static_cast<int>((bank5 >> 3) & 0x1);
+      int light_val = static_cast<int>((bank5 >> 0) & 0x1);
+     
+#else
+
       uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
       uint8_t p2 = (out >> 10) & 0x7F;  // next 7 bits
       uint8_t p3 = (out >> 3)  & 0x7F;  // next 7 bits
@@ -330,6 +391,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
 
       uint8_t seg_b = (p1 >> 5) & 0x1;
       uint8_t seg_c = (p1 >> 4) & 0x1;
+
       int8_t digit2 = decode_7seg(p2);
       int8_t digit3 = decode_7seg(p3);
 
@@ -340,7 +402,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       int heater_val = static_cast<int>((p1 >> 2) & 0x1);
       int pump_val = static_cast<int>((p4 >> 2) & 0x1);
       int light_val = static_cast<int>((p4 >> 1) & 0x1);
-
+#endif
       // Log at info level so this appears even when debug is off
       ESP_LOGI(TAG, "Heartbeat publish: temp=%d set=%d status=0x%X heater=%d pump=%d light=%d", temp, last_set_temp, static_cast<unsigned>(p4), heater_val, pump_val, light_val);
 
@@ -392,6 +454,19 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     // Decode the frame and detect changes using decoded digits (not raw 24-bit value)
     uint32_t out = value & 0xFFFFFF;
 
+#ifdef MC14889
+    // Split into parts
+    uint8_t bank5 = (out >> 12) & 0xF;
+    uint8_t bank4 = (out >> 12) & 0xF;
+    uint8_t p1 = (out >> 8)  & 0xF;   // bank3
+    uint8_t p2 = (out >> 4)  & 0xF;   // bank2
+    uint8_t p3 = (out >> 0)  & 0xF;   // bank1 is LSB in data stream
+
+    // Heartbeat: publish binary sensor states (semi-educated guesses on bit locations)
+    int8_t cur_heater = static_cast<int8_t>((bank4 >> 0) & 0x1);
+    int8_t cur_pump = static_cast<int8_t>((bank5 >> 3) & 0x1);
+    int8_t cur_light = static_cast<int8_t>((bank5 >> 0) & 0x1);
+#else
     // Split into parts
     uint8_t p1 = (out >> 17) & 0x7F;  // top 7 bits
     uint8_t p2 = (out >> 10) & 0x7F;  // next 7 bits
@@ -409,7 +484,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       last_frame_valid = false;
       return;
     }
-
+#endif
     // Small debug: log raw frame and parts
     ESP_LOGD(TAG, "Frame received raw=0x%06X p1=0x%02X p2=0x%02X p3=0x%02X p4=0x%X", out, static_cast<unsigned>(p1), static_cast<unsigned>(p2), static_cast<unsigned>(p3), static_cast<unsigned>(p4));
 
@@ -575,12 +650,17 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
       }
     }
 
+#ifdef MC14889
+
+    // these vars assigned above
+   
+#else
     // Always update binary sensors from p4 and p1 with per-bit stability
     uint8_t p1_bits = p1;
     int8_t cur_heater = static_cast<int8_t>((p1_bits >> 2) & 0x1);
     int8_t cur_pump = static_cast<int8_t>((p4 >> 2) & 0x1);
     int8_t cur_light = static_cast<int8_t>((p4 >> 1) & 0x1);
-
+#endif
     // Update heater stability (existing)
     if (candidate_heater == cur_heater) { if (stable_heater < 255) stable_heater++; } else { candidate_heater = cur_heater; stable_heater = 1; }
 
