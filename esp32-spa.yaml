@@ -33,10 +33,6 @@ captive_portal:
 external_components:
   - source: esp32-spa
   
-logger:
-  level: WARN
-  baud_rate: 0   # Prevent UART timing issues
-
 text_sensor:
   - platform: inputs
     parent_id: display_handler
