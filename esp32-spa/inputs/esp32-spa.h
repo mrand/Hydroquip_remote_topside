@@ -239,8 +239,8 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     last_set_sent_time_ms = esphome::millis();
 
     // Ensure COOL button pin is setup as an output (harmless if balboa_custom also configures it)
-    gpio_set_direction((gpio_num_t)PIN_WRITE_BTN2, GPIO_MODE_OUTPUT);
     gpio_set_level((gpio_num_t)PIN_WRITE_BTN2, 0);
+    gpio_set_direction((gpio_num_t)PIN_WRITE_BTN2, GPIO_MODE_OUTPUT);
 
     // Press COOL shortly after boot to initialize/set the displayed set-temp
     // Press on at 1.5s, release at 1.7s. Update the last_set_sent_time when pressed.
