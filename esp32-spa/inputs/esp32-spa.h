@@ -17,7 +17,7 @@ namespace esphome { namespace text_sensor { class TextSensor; } }
 #include "esp_timer.h"
 
 // Forward declaration of C ISR wrapper (defined after the namespace)
-extern "C" void esp32_spa_isr_wrapper(void* arg);
+extern "C" void IRAM_ATTR esp32_spa_isr_wrapper(void* arg);
 
 static const char *TAG = "esp32-spa";
 
